@@ -1,12 +1,16 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from groq import Groq
 import json
-from openai import OpenAI
+import os
+import shutil
 
 app = FastAPI()
-client = OpenAI(api_key="YOUR_API_KEY") # Replace with your key
 
-# Allow your frontend to talk to your backend
+# Paste your free Groq key here
+client = Groq(api_key="gsk_YOUR_GROQ_KEY_HERE...") 
+
+# Allow frontend to talk to backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -16,31 +20,55 @@ app.add_middleware(
 
 @app.post("/process-lecture")
 async def process_lecture(file: UploadFile = File(...)):
-    # 1. Read the uploaded text file
-    content = await file.read()
-    lecture_text = content.decode("utf-8")
-    
-    # 2. The AI Prompt (from our MVP)
-    prompt = f"""
-    Analyze this lecture and return strictly valid JSON:
-    {{
-        "notes": "Comprehensive summary",
-        "highlights": ["Point 1", "Point 2"],
-        "flashcards": [{{"q": "Question", "a": "Answer"}}],
-        "mind_map": "Mermaid.js syntax"
-    }}
-    Lecture: {lecture_text}
-    """
+    # 1. Save the uploaded file temporarily
+    temp_file_path = f"temp_{file.filename}"
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    # 3. Call the AI
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={ "type": "json_object" },
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    
-    # 4. Return the JSON to the frontend
-    return json.loads(response.choices[0].message.content)
+    lecture_text = ""
 
-# Run this server by typing `uvicorn main:app --reload` in your terminal.
+    try:
+        filename_lower = file.filename.lower()
+        
+        # 2. Transcribe Audio/Video using Groq's Free Whisper Model
+        if filename_lower.endswith(('.mp3', '.mp4', '.m4a', '.wav', '.webm')):
+            with open(temp_file_path, "rb") as audio_file:
+                transcript = client.audio.transcriptions.create(
+                  model="whisper-large-v3", 
+                  file=(temp_file_path, audio_file.read())
+                )
+            lecture_text = transcript.text
+            
+        # 3. Handle standard text files
+        elif filename_lower.endswith('.txt'):
+            with open(temp_file_path, "r", encoding="utf-8") as f:
+                lecture_text = f.read()
+                
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format. Use .txt, .mp3, or .mp4")
+
+        # 4. Generate Notes using Groq's Free Llama 3 Model
+        prompt = f"""
+        Analyze this lecture and return strictly valid JSON:
+        {{
+            "notes": "Comprehensive summary",
+            "highlights": ["Point 1", "Point 2"],
+            "flashcards": [{{"q": "Question", "a": "Answer"}}],
+            "mind_map": "Mermaid.js syntax"
+        }}
+        Lecture: {lecture_text}
+        """
+
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            response_format={ "type": "json_object" },
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        
+        return json.loads(response.choices[0].message.content)
+
+    finally:
+        # 5. Clean up the temporary file so the server doesn't crash
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
